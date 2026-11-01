@@ -1,0 +1,16 @@
+[package]
+name = "plamo-tr"
+version = "0.1.0"
+edition = "2024"
+description = "Translate text from the command line with PLaMo Translate"
+license = "Apache-2.0"
+repository = "https://github.com/conao3/rust-plamo-tr"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+dirs = "7.0.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "form", "json", "query", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+whatlang = "0.18.0"
