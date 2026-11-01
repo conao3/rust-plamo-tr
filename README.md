@@ -63,6 +63,25 @@ The refresh token is a long-lived credential for your PLaMo account. Do not shar
 
 Translations count toward the browser extension quota of your plan (unlimited on the Lite plan), not the text translation quota.
 
+## Library
+
+The crate also builds as a library (`plamo_tr`) for tools that translate many texts. `Translator::translate_batch` sends several texts in one request, in plain text or HTML (tags are kept), and the ID token is renewed while a long job runs.
+
+```toml
+[dependencies]
+plamo-tr = { git = "https://github.com/conao3/rust-plamo-tr" }
+```
+
+```rust
+use plamo_tr::api::{Auth, Format, Options, Translator};
+use plamo_tr::lang::Direction;
+
+let translator = Translator::sign_in(&Auth::load("auth.json".as_ref())?)?;
+let direction = Direction { source: Some("en"), target: "ja" };
+let options = Options { direction: &direction, format: Format::Html, writing_style: None };
+let translations = translator.translate_batch(&["<code>C-x C-f</code> visits a file.", "Fonts"], &options)?;
+```
+
 ## Install
 
 ```console

@@ -4,9 +4,10 @@
 
 ## Layout
 
+- `src/lib.rs`: the library crate (`plamo_tr::api` and `plamo_tr::lang`), used by the CLI and by other tools.
 - `src/main.rs`: command-line arguments, input, and streamed output.
 - `src/lang.rs`: supported languages, local detection with whatlang, and the rules that pick the source and target.
-- `src/api.rs`: Firebase token refresh from the auth file and the streaming translate request.
+- `src/api.rs`: Firebase token refresh from the auth file (renewed before the ID token expires), the streaming translate request for one or more texts in plain text or HTML, and retries on network and server errors.
 
 ## Conventions
 

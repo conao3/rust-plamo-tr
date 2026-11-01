@@ -1,14 +1,11 @@
-mod api;
-mod lang;
-
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 
-use crate::api::{Auth, Translator};
-use crate::lang::{LANGUAGES, parse_language, resolve};
+use plamo_tr::api::{Auth, Format, Options, Translator};
+use plamo_tr::lang::{LANGUAGES, parse_language, resolve};
 
 /// Translate text with PLaMo Translate through the browser extension API.
 ///
@@ -99,7 +96,12 @@ fn main() -> Result<()> {
 
     let mut stdout = std::io::stdout().lock();
     let mut ends_with_newline = false;
-    translator.translate(text, &direction, cli.style.map(Style::as_str), |chunk| {
+    let options = Options {
+        direction: &direction,
+        format: Format::Plain,
+        writing_style: cli.style.map(Style::as_str),
+    };
+    translator.translate_stream(&[text], &options, |_, chunk| {
         if !chunk.is_empty() {
             ends_with_newline = chunk.ends_with('\n');
         }
