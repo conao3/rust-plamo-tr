@@ -1,116 +1,640 @@
-use std::io::{IsTerminal, Read, Write};
+mod output;
+
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
-use clap::{Parser, ValueEnum};
+use anyhow::{Context, anyhow};
+use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value, json};
 
-use plamo_tr::api::{Auth, Format, Options, Translator};
+use plamo_tr::api::{Auth, Format, Options, ServiceError, Translator};
 use plamo_tr::lang::{LANGUAGES, parse_language, resolve};
 
+use output::OutputFormat;
+
+const GLOBAL_OPTIONS_WITH_VALUE: &[&str] = &["--output", "--query"];
+const INPUT_OPTIONS: &[&str] = &["cli-input-json", "generate-cli-skeleton", "help"];
+
 /// Translate text with PLaMo Translate through the browser extension API.
-///
-/// Without --source the source language is detected automatically. Without
-/// --target, Japanese text is translated into English and anything else into
-/// Japanese.
 #[derive(Parser)]
-#[command(version)]
+#[command(version, disable_help_subcommand = true, subcommand_required = true)]
 struct Cli {
-    /// Text to translate. Read from stdin when omitted.
-    text: Vec<String>,
+    /// Format of the output.
+    #[arg(long, global = true, help_heading = "Global Options", value_enum, default_value_t = OutputFormat::Json)]
+    output: OutputFormat,
 
-    /// Source language code (auto-detected when omitted).
-    #[arg(short, long, value_parser = parse_language)]
-    source: Option<&'static str>,
+    /// JMESPath expression that selects part of the output.
+    #[arg(long, global = true, help_heading = "Global Options")]
+    query: Option<String>,
 
-    /// Target language code (en for Japanese input, ja otherwise).
-    #[arg(short, long, value_parser = parse_language)]
-    target: Option<&'static str>,
+    /// Print the parameters and the full error chain to stderr.
+    #[arg(long, global = true, help_heading = "Global Options")]
+    debug: bool,
 
-    /// Writing style of the translation.
-    #[arg(long, value_enum)]
-    style: Option<Style>,
+    #[command(subcommand)]
+    command: Command,
+}
 
-    /// JSON file with the apiKey and refreshToken of a PLaMo Translate login.
-    /// Defaults to plamo-tr/auth.json in the user config directory.
-    #[arg(long, env = "PLAMO_AUTH_FILE")]
-    auth_file: Option<PathBuf>,
+#[derive(Subcommand)]
+enum Command {
+    /// Translate text.
+    #[command(subcommand_required = true)]
+    Text {
+        #[command(subcommand)]
+        command: TextCommand,
+    },
+    /// Languages supported by PLaMo Translate.
+    #[command(subcommand_required = true)]
+    Language {
+        #[command(subcommand)]
+        command: LanguageCommand,
+    },
+}
 
-    /// Print the supported language codes and exit.
-    #[arg(long)]
-    list_languages: bool,
+#[derive(Subcommand)]
+enum TextCommand {
+    /// Translate a text.
+    ///
+    /// Without --source-language-code the source language is detected
+    /// automatically. Without --target-language-code, Japanese text is
+    /// translated into English and anything else into Japanese. Either the
+    /// source or the target must be ja or en.
+    TranslateText(TranslateTextArgs),
+}
+
+#[derive(Subcommand)]
+enum LanguageCommand {
+    /// List the supported language codes.
+    ListLanguages(ListLanguagesArgs),
+}
+
+#[derive(Args, Default)]
+struct InputArgs {
+    /// Read the parameters from JSON (PascalCase keys). Parameters given on
+    /// the command line take precedence.
+    #[arg(long, value_parser = parse_value)]
+    cli_input_json: Option<String>,
+
+    /// Print a JSON skeleton of the input or the output and exit.
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "input")]
+    generate_cli_skeleton: Option<Skeleton>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-enum Style {
+enum Skeleton {
+    Input,
+    Output,
+}
+
+#[derive(Args, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct TranslateTextArgs {
+    /// Text to translate. Use file:///dev/stdin to read standard input.
+    #[arg(long, value_parser = parse_value)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+
+    /// Source language code (detected when omitted).
+    #[arg(long, value_parser = parse_language_code)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_language_code: Option<LanguageCode>,
+
+    /// Target language code (en for Japanese text, ja otherwise).
+    #[arg(long, value_parser = parse_language_code)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_language_code: Option<LanguageCode>,
+
+    /// Writing style of the translation.
+    #[arg(long, value_enum)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    writing_style: Option<WritingStyle>,
+
+    /// JSON file with the apiKey and refreshToken of a PLaMo Translate login.
+    /// Defaults to $PLAMO_AUTH_FILE, then plamo-tr/auth.json in the user
+    /// config directory.
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    #[serde(skip)]
+    input: InputArgs,
+}
+
+#[derive(Args, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct ListLanguagesArgs {
+    #[command(flatten)]
+    #[serde(skip)]
+    input: InputArgs,
+}
+
+#[derive(Clone, Copy, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WritingStyle {
     Plain,
     Polite,
 }
 
-impl Style {
+impl WritingStyle {
     fn as_str(self) -> &'static str {
         match self {
-            Style::Plain => "plain",
-            Style::Polite => "polite",
+            WritingStyle::Plain => "plain",
+            WritingStyle::Polite => "polite",
         }
     }
 }
 
-fn default_auth_file() -> Result<PathBuf> {
+#[derive(Clone, Copy)]
+struct LanguageCode(&'static str);
+
+impl Serialize for LanguageCode {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for LanguageCode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        parse_language_code(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+fn parse_language_code(value: &str) -> Result<LanguageCode, String> {
+    parse_language(value).map(LanguageCode)
+}
+
+fn parse_value(value: &str) -> Result<String, String> {
+    match value.strip_prefix("file://") {
+        Some(path) => std::fs::read_to_string(path).map_err(|error| format!("{path}: {error}")),
+        None => Ok(value.to_owned()),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct TranslateTextOutput {
+    translated_text: String,
+    source_language_code: Option<&'static str>,
+    target_language_code: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ListLanguagesOutput {
+    languages: Vec<LanguageOutput>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct LanguageOutput {
+    language_code: &'static str,
+    language_name: &'static str,
+}
+
+enum Failure {
+    Usage(anyhow::Error),
+    Target(anyhow::Error),
+    Other(anyhow::Error),
+}
+
+impl Failure {
+    fn exit_code(&self) -> u8 {
+        match self {
+            Failure::Usage(_) => 252,
+            Failure::Target(_) => 254,
+            Failure::Other(_) => 255,
+        }
+    }
+
+    fn error(&self) -> &anyhow::Error {
+        match self {
+            Failure::Usage(error) | Failure::Target(error) | Failure::Other(error) => error,
+        }
+    }
+}
+
+impl From<anyhow::Error> for Failure {
+    fn from(error: anyhow::Error) -> Self {
+        if error.downcast_ref::<ServiceError>().is_some() {
+            Failure::Target(error)
+        } else {
+            Failure::Other(error)
+        }
+    }
+}
+
+fn usage(message: impl std::fmt::Display) -> Failure {
+    Failure::Usage(anyhow!("{message}"))
+}
+
+/// Turn a trailing `help` word into `--help`, so that `help` works at every
+/// level of the command tree.
+fn rewrite_help(mut args: Vec<OsString>) -> Vec<OsString> {
+    let mut index = 1;
+    while index < args.len() {
+        let arg = args[index].to_string_lossy();
+        if GLOBAL_OPTIONS_WITH_VALUE.contains(&arg.as_ref()) {
+            index += 2;
+            continue;
+        }
+        if arg == "help" && index == args.len() - 1 {
+            args[index] = "--help".into();
+            break;
+        }
+        let is_global = arg == "--debug"
+            || GLOBAL_OPTIONS_WITH_VALUE
+                .iter()
+                .any(|option| arg.starts_with(&format!("{option}=")));
+        if arg.starts_with('-') && !is_global {
+            break;
+        }
+        index += 1;
+    }
+    args
+}
+
+fn subcommand_path(matches: &clap::ArgMatches) -> Vec<String> {
+    let mut path = Vec::new();
+    let mut current = matches;
+    while let Some((name, sub)) = current.subcommand() {
+        path.push(name.to_owned());
+        current = sub;
+    }
+    path
+}
+
+fn pascal_case(kebab: &str) -> String {
+    kebab
+        .split('-')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// The input skeleton of a subcommand, derived from its clap definition.
+fn input_skeleton(path: &[String]) -> Value {
+    let mut command = Cli::command();
+    for name in path {
+        command = command
+            .find_subcommand(name)
+            .expect("subcommand path comes from the parsed arguments")
+            .clone();
+    }
+    let mut skeleton = Map::new();
+    for arg in command.get_arguments() {
+        let Some(long) = arg.get_long() else { continue };
+        if INPUT_OPTIONS.contains(&long) || arg.is_global_set() {
+            continue;
+        }
+        let value = match arg.get_action() {
+            ArgAction::SetTrue | ArgAction::SetFalse => json!(false),
+            _ => match arg.get_possible_values().first() {
+                Some(possible) => json!(possible.get_name()),
+                None => json!(""),
+            },
+        };
+        skeleton.insert(pascal_case(long), value);
+    }
+    Value::Object(skeleton)
+}
+
+/// Overlay the parameters given on the command line onto `--cli-input-json`.
+fn merge_input<T: Serialize + DeserializeOwned>(args: &T, input: &InputArgs) -> Result<T, Failure> {
+    let given = serde_json::to_value(args).map_err(|error| Failure::Other(error.into()))?;
+    let Some(json) = &input.cli_input_json else {
+        return serde_json::from_value(given).map_err(usage);
+    };
+    let mut merged: Value = serde_json::from_str(json)
+        .map_err(|error| usage(format!("--cli-input-json is not valid JSON: {error}")))?;
+    let (Value::Object(merged_map), Value::Object(given_map)) = (&mut merged, given) else {
+        return Err(usage("--cli-input-json must be a JSON object"));
+    };
+    merged_map.extend(given_map);
+    serde_json::from_value(merged).map_err(|error| usage(format!("--cli-input-json: {error}")))
+}
+
+fn default_auth_file() -> anyhow::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("PLAMO_AUTH_FILE") {
+        return Ok(path.into());
+    }
     let dir = dirs::config_dir().context("could not determine the user config directory")?;
     Ok(dir.join("plamo-tr").join("auth.json"))
 }
 
-fn read_input(args: &[String]) -> Result<String> {
-    if !args.is_empty() {
-        return Ok(args.join(" "));
+fn translate_text(args: TranslateTextArgs, debug: bool) -> Result<Value, Failure> {
+    if debug {
+        eprintln!(
+            "parameters: {}",
+            serde_json::to_string(&json!({
+                "SourceLanguageCode": args.source_language_code,
+                "TargetLanguageCode": args.target_language_code,
+                "WritingStyle": args.writing_style,
+                "AuthFile": args.auth_file,
+            }))
+            .unwrap_or_default()
+        );
     }
-    let mut stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        bail!("pass the text as arguments or through stdin");
-    }
-    let mut text = String::new();
-    stdin.read_to_string(&mut text)?;
-    Ok(text)
-}
-
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    if cli.list_languages {
-        for language in LANGUAGES {
-            println!("{}\t{}", language.code, language.name);
-        }
-        return Ok(());
-    }
-
-    let text = read_input(&cli.text)?;
+    let Some(text) = args.text else {
+        return Err(usage("the required parameter --text was not provided"));
+    };
     let text = text.trim();
     if text.is_empty() {
-        bail!("nothing to translate");
+        return Err(usage("--text is empty"));
     }
-    let direction = resolve(cli.source, cli.target, text)?;
-    let auth_file = match cli.auth_file {
+    let direction = resolve(
+        args.source_language_code.map(|code| code.0),
+        args.target_language_code.map(|code| code.0),
+        text,
+    )
+    .map_err(Failure::Target)?;
+    let auth_file = match args.auth_file {
         Some(path) => path,
         None => default_auth_file()?,
     };
     let translator = Translator::sign_in(&Auth::load(&auth_file)?)?;
-
-    let mut stdout = std::io::stdout().lock();
-    let mut ends_with_newline = false;
     let options = Options {
         direction: &direction,
         format: Format::Plain,
-        writing_style: cli.style.map(Style::as_str),
+        writing_style: args.writing_style.map(WritingStyle::as_str),
     };
-    translator.translate_stream(&[text], &options, |_, chunk| {
-        if !chunk.is_empty() {
-            ends_with_newline = chunk.ends_with('\n');
-        }
-        stdout.write_all(chunk.as_bytes())?;
-        stdout.flush()?;
-        Ok(())
-    })?;
-    if !ends_with_newline {
-        writeln!(stdout)?;
+    let translated_text = translator
+        .translate_batch(&[text], &options)?
+        .remove(0)
+        .trim_end()
+        .to_owned();
+    to_value(TranslateTextOutput {
+        translated_text,
+        source_language_code: direction.source,
+        target_language_code: direction.target,
+    })
+}
+
+fn list_languages() -> ListLanguagesOutput {
+    ListLanguagesOutput {
+        languages: LANGUAGES
+            .iter()
+            .map(|language| LanguageOutput {
+                language_code: language.code,
+                language_name: language.name,
+            })
+            .collect(),
     }
-    Ok(())
+}
+
+fn to_value(output: impl Serialize) -> Result<Value, Failure> {
+    serde_json::to_value(output).map_err(|error| Failure::Other(error.into()))
+}
+
+/// Run the subcommand. `None` means a skeleton was printed instead.
+fn run(cli: Cli, path: &[String]) -> Result<Option<Value>, Failure> {
+    let (input, output_skeleton) = match &cli.command {
+        Command::Text {
+            command: TextCommand::TranslateText(args),
+        } => (
+            &args.input,
+            to_value(TranslateTextOutput {
+                translated_text: String::new(),
+                source_language_code: Some(""),
+                target_language_code: "",
+            })?,
+        ),
+        Command::Language {
+            command: LanguageCommand::ListLanguages(args),
+        } => (
+            &args.input,
+            to_value(ListLanguagesOutput {
+                languages: vec![LanguageOutput {
+                    language_code: "",
+                    language_name: "",
+                }],
+            })?,
+        ),
+    };
+    match input.generate_cli_skeleton {
+        Some(Skeleton::Input) => {
+            println!("{}", output::json(&input_skeleton(path)));
+            return Ok(None);
+        }
+        Some(Skeleton::Output) => {
+            println!("{}", output::json(&output_skeleton));
+            return Ok(None);
+        }
+        None => {}
+    }
+    let value = match cli.command {
+        Command::Text {
+            command: TextCommand::TranslateText(args),
+        } => {
+            let args = merge_input(&args, &args.input)?;
+            translate_text(args, cli.debug)?
+        }
+        Command::Language {
+            command: LanguageCommand::ListLanguages(args),
+        } => {
+            merge_input(&args, &args.input)?;
+            to_value(list_languages())?
+        }
+    };
+    Ok(Some(value))
+}
+
+fn main() -> ExitCode {
+    let args = rewrite_help(std::env::args_os().collect());
+    let matches = match Cli::command().try_get_matches_from(args) {
+        Ok(matches) => matches,
+        Err(error) => {
+            let _ = error.print();
+            return ExitCode::from(if error.use_stderr() { 252 } else { 0 });
+        }
+    };
+    let path = subcommand_path(&matches);
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            return ExitCode::from(252);
+        }
+    };
+    let format = cli.output;
+    let debug = cli.debug;
+    let query = match cli.query.as_deref().map(jmespath::compile).transpose() {
+        Ok(query) => query,
+        Err(error) => {
+            eprintln!("error: invalid --query: {error}");
+            return ExitCode::from(252);
+        }
+    };
+    let result = run(cli, &path).and_then(|value| {
+        let Some(value) = value else { return Ok(()) };
+        let value = match &query {
+            Some(query) => {
+                let found = query
+                    .search(&value)
+                    .map_err(|error| usage(format!("--query: {error}")))?;
+                serde_json::to_value(&*found).map_err(|error| Failure::Other(error.into()))?
+            }
+            None => value,
+        };
+        println!("{}", output::render(&value, format));
+        Ok(())
+    });
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            if debug {
+                eprintln!("error: {:?}", failure.error());
+            } else {
+                eprintln!("error: {:#}", failure.error());
+            }
+            ExitCode::from(failure.exit_code())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(words: &[&str]) -> Vec<OsString> {
+        words.iter().map(OsString::from).collect()
+    }
+
+    fn parse(words: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(rewrite_help(args(words)))
+    }
+
+    #[test]
+    fn help_works_at_every_level() {
+        for words in [
+            &["plamo-tr", "help"][..],
+            &["plamo-tr", "text", "help"],
+            &[
+                "plamo-tr",
+                "--output",
+                "text",
+                "text",
+                "translate-text",
+                "help",
+            ],
+        ] {
+            let error = parse(words).err().expect("help is not a command");
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        }
+    }
+
+    #[test]
+    fn help_as_a_parameter_value_is_kept() {
+        let cli = parse(&["plamo-tr", "text", "translate-text", "--text", "help"]).unwrap();
+        let Command::Text {
+            command: TextCommand::TranslateText(args),
+        } = cli.command
+        else {
+            panic!("parsed another command");
+        };
+        assert_eq!(args.text.as_deref(), Some("help"));
+    }
+
+    #[test]
+    fn rejects_positional_arguments() {
+        assert!(parse(&["plamo-tr", "text", "translate-text", "こんにちは"]).is_err());
+    }
+
+    #[test]
+    fn input_skeleton_is_accepted_as_cli_input_json() {
+        let path = ["text".to_owned(), "translate-text".to_owned()];
+        let skeleton = input_skeleton(&path);
+        assert_eq!(
+            skeleton,
+            json!({
+                "Text": "",
+                "SourceLanguageCode": "",
+                "TargetLanguageCode": "",
+                "WritingStyle": "plain",
+                "AuthFile": "",
+            })
+        );
+        let mut keys: Map<String, Value> = skeleton.as_object().unwrap().clone();
+        keys.insert("SourceLanguageCode".into(), json!("ja"));
+        keys.insert("TargetLanguageCode".into(), json!("en"));
+        let input = InputArgs {
+            cli_input_json: Some(Value::Object(keys).to_string()),
+            generate_cli_skeleton: None,
+        };
+        assert!(merge_input(&TranslateTextArgs::default(), &input).is_ok());
+    }
+
+    #[test]
+    fn command_line_overrides_cli_input_json() {
+        let cli = parse(&[
+            "plamo-tr",
+            "text",
+            "translate-text",
+            "--target-language-code",
+            "ko",
+            "--cli-input-json",
+            r#"{"Text":"Hello","TargetLanguageCode":"fr"}"#,
+        ])
+        .unwrap();
+        let Command::Text {
+            command: TextCommand::TranslateText(args),
+        } = cli.command
+        else {
+            panic!("parsed another command");
+        };
+        let merged = merge_input(&args, &args.input).ok().unwrap();
+        assert_eq!(merged.text.as_deref(), Some("Hello"));
+        assert_eq!(merged.target_language_code.map(|code| code.0), Some("ko"));
+    }
+
+    #[test]
+    fn cli_input_json_rejects_unknown_keys_and_languages() {
+        for json in [r#"{"Txt":"Hello"}"#, r#"{"TargetLanguageCode":"xx"}"#] {
+            let input = InputArgs {
+                cli_input_json: Some(json.to_owned()),
+                generate_cli_skeleton: None,
+            };
+            let failure = merge_input(&TranslateTextArgs::default(), &input)
+                .err()
+                .expect("invalid input");
+            assert_eq!(failure.exit_code(), 252);
+        }
+    }
+
+    #[test]
+    fn reads_values_from_files() {
+        let path = std::env::temp_dir().join("plamo-tr-parse-value-test.txt");
+        std::fs::write(&path, "こんにちは").unwrap();
+        assert_eq!(
+            parse_value(&format!("file://{}", path.display())),
+            Ok("こんにちは".to_owned())
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(parse_value("Hello"), Ok("Hello".to_owned()));
+    }
+
+    #[test]
+    fn service_errors_exit_with_254() {
+        let failure = Failure::from(anyhow::Error::new(ServiceError("quota".into())));
+        assert_eq!(failure.exit_code(), 254);
+        assert_eq!(Failure::from(anyhow!("network")).exit_code(), 255);
+    }
+
+    #[test]
+    fn languages_are_listed_with_pascal_case_keys() {
+        let value = to_value(list_languages()).ok().unwrap();
+        assert_eq!(
+            value["Languages"][0],
+            json!({"LanguageCode": "ja", "LanguageName": "Japanese"})
+        );
+    }
 }

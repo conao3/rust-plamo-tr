@@ -76,7 +76,9 @@ pub fn parse_language(value: &str) -> Result<&'static str, String> {
         .iter()
         .find(|language| language.code.eq_ignore_ascii_case(value))
         .map(|language| language.code)
-        .ok_or_else(|| format!("unsupported language `{value}` (see --list-languages)"))
+        .ok_or_else(|| {
+            format!("unsupported language `{value}` (see `plamo-tr language list-languages`)")
+        })
 }
 
 pub fn detect(text: &str) -> Option<&'static str> {
@@ -116,7 +118,7 @@ pub fn resolve(
         None => match detected {
             Some(detected) => Some(detected),
             None => bail!(
-                "could not detect the source language; pass --source to translate into {target}"
+                "could not detect the source language; pass --source-language-code to translate into {target}"
             ),
         },
     };

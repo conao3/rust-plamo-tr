@@ -98,6 +98,18 @@ struct ErrorDetail {
     message: String,
 }
 
+/// An error answered by PLaMo Translate or its token endpoint.
+#[derive(Debug)]
+pub struct ServiceError(pub String);
+
+impl std::fmt::Display for ServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ServiceError {}
+
 struct IdToken {
     value: String,
     expires_at: Instant,
@@ -207,10 +219,11 @@ fn refresh(client: &Client, auth: &Auth) -> Result<IdToken> {
         .send()
         .context("failed to reach the token endpoint")?;
     if !response.status().is_success() {
-        bail!(
+        return Err(ServiceError(format!(
             "token refresh failed ({}): sign in to {SITE_ORIGIN} again and update the auth file",
             response.status()
-        );
+        ))
+        .into());
     }
     let token: TokenResponse = response.json()?;
     let expires_in: u64 = token
@@ -229,10 +242,11 @@ fn check_status(response: Response) -> Result<Response> {
         return Ok(response);
     }
     let body = response.text().unwrap_or_default();
-    match serde_json::from_str::<ErrorBody>(&body) {
-        Ok(ErrorBody { error }) => bail!("{} ({status}): {}", error.code, error.message),
-        Err(_) => bail!("PLaMo Translate returned {status}: {body}"),
-    }
+    let message = match serde_json::from_str::<ErrorBody>(&body) {
+        Ok(ErrorBody { error }) => format!("{} ({status}): {}", error.code, error.message),
+        Err(_) => format!("PLaMo Translate returned {status}: {body}"),
+    };
+    Err(ServiceError(message).into())
 }
 
 fn parse_event(line: &str) -> Result<Vec<Chunk>> {

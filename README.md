@@ -7,28 +7,75 @@ This is an unofficial tool and is not affiliated with Preferred Networks.
 ## Usage
 
 ```console
-$ plamo-tr 今日はいい天気ですね。
-The weather is nice today, isn't it?
+$ plamo-tr text translate-text --text 今日はいい天気ですね。
+{
+  "TranslatedText": "The weather is nice today, isn't it?",
+  "SourceLanguageCode": null,
+  "TargetLanguageCode": "en"
+}
 
-$ echo "The weather is nice today, so let us go for a walk." | plamo-tr
+$ echo "The weather is nice today, so let us go for a walk." \
+    | plamo-tr text translate-text --text file:///dev/stdin --query TranslatedText --output text
 今日はいい天気だから、散歩に行こう。
 
-$ plamo-tr -t ko "The weather is nice today, so let us go for a walk."
+$ plamo-tr --output text --query TranslatedText text translate-text \
+    --target-language-code ko --text "The weather is nice today, so let us go for a walk."
 오늘 날씨가 좋으니 산책하러 가요.
 
-$ plamo-tr -s ja -t zh-Hans 今日はいい天気なので散歩に行きましょう。
+$ plamo-tr text translate-text --source-language-code ja --target-language-code zh-Hans \
+    --text 今日はいい天気なので散歩に行きましょう。 --query TranslatedText --output text
 今天天气很好，我们去散散步吧。
+
+$ plamo-tr language list-languages --output table --query 'Languages[:2]'
++--------------+--------------+
+| LanguageCode | LanguageName |
++--------------+--------------+
+| ja           | Japanese     |
+| en           | English      |
++--------------+--------------+
 ```
 
-The text comes from the arguments, or from stdin when no argument is given. The translation is streamed to stdout.
+The command line follows the grammar of the AWS CLI: `plamo-tr [global options] <command> <subcommand> [--parameter value ...]`. Every parameter is named; there are no positional arguments.
+
+| Command | Subcommand | Output |
+|---|---|---|
+| `text` | `translate-text` | `TranslatedText`, `SourceLanguageCode` (`null` when PLaMo Translate detects it), `TargetLanguageCode` |
+| `language` | `list-languages` | `Languages`, a list of `LanguageCode` and `LanguageName` |
+
+Parameters of `text translate-text`:
+
+| Parameter | Meaning |
+|---|---|
+| `--text <TEXT>` | Text to translate. Required. `file:///dev/stdin` reads standard input. |
+| `--source-language-code <LANG>` | Source language. Detected automatically when omitted. |
+| `--target-language-code <LANG>` | Target language. When omitted, Japanese text is translated into English and anything else into Japanese. |
+| `--writing-style <plain\|polite>` | Writing style of the translation. |
+| `--auth-file <PATH>` | Login file (see below). Defaults to `PLAMO_AUTH_FILE`, then the user config directory. |
+
+Every subcommand also takes:
+
+- `--cli-input-json <JSON>`: all parameters as one JSON object whose keys are the parameter names in PascalCase (`Text`, `SourceLanguageCode`, ...). Parameters given on the command line take precedence.
+- `--generate-cli-skeleton [input|output]`: print a JSON skeleton of the input (default) or the output and exit.
+
+A value that starts with `file://` is read from that file, for example `--text file://article.txt` or `--cli-input-json file://input.json`.
+
+Global options, accepted anywhere on the command line:
 
 | Option | Meaning |
 |---|---|
-| `-s`, `--source <LANG>` | Source language. Detected automatically when omitted. |
-| `-t`, `--target <LANG>` | Target language. When omitted, Japanese text is translated into English and anything else into Japanese. |
-| `--style <plain\|polite>` | Writing style of the translation. |
-| `--auth-file <PATH>` | Login file (see below). Also read from `PLAMO_AUTH_FILE`. |
-| `--list-languages` | Print the supported language codes. |
+| `--output <json\|text\|table>` | Output format. Defaults to `json`. `text` prints the values of an object tab-separated on one line and each list item on its own line. |
+| `--query <JMESPath>` | Select part of the output with a [JMESPath](https://jmespath.org/) expression, for example `TranslatedText`. |
+| `--debug` | Print the parameters and the full error chain to stderr. |
+| `--version` | Print the version. |
+
+`help` prints the help of each level: `plamo-tr help`, `plamo-tr text help`, `plamo-tr text translate-text help`.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Success. |
+| 252 | The command line or a parameter is invalid (unknown command or parameter, unsupported language code, missing or empty `--text`, invalid `--cli-input-json` or `--query`). |
+| 254 | PLaMo Translate cannot handle the request: it answered with an error (including a rejected login), or the language pair is not supported. |
+| 255 | Any other failure, such as an unreadable auth file or an unreachable network. |
 
 PLaMo Translate translates between Japanese or English and the other supported languages, so either the source or the target must be `ja` or `en`. When the source is omitted and the target is `ja` or `en`, PLaMo Translate detects the source language itself. For other targets, `plamo-tr` detects the source language locally with [whatlang](https://github.com/greyblake/whatlang-rs) and sends it with the request.
 
@@ -85,7 +132,7 @@ let translations = translator.translate_batch(&["<code>C-x C-f</code> visits a f
 ## Install
 
 ```console
-$ nix run github:conao3/rust-plamo-tr -- 今日はいい天気ですね。
+$ nix run github:conao3/rust-plamo-tr -- text translate-text --text 今日はいい天気ですね。
 $ nix profile install github:conao3/rust-plamo-tr
 ```
 
