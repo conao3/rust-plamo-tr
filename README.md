@@ -23,7 +23,7 @@
 
 `plamo-tr` sends text to [PLaMo Translate](https://translate.preferredai.jp/) from your terminal and prints the translation. It calls the same API as the PLaMo Translate browser extension, and signs in with your PLaMo account.
 
-The command line works like the AWS CLI: `<command> <subcommand>` with named parameters, JSON output, `--query`, `--output text`, and `--cli-input-json`. In a shell script, you pipe text in and pick the translation out with a JMESPath query.
+The command line works like the AWS CLI: `<command> <subcommand>` with named parameters, JSON output, and `--output text` or `--output table`. In a shell script, you pipe text in and pick the translation out of the JSON with `jq`.
 
 > [!NOTE]
 > `plamo-tr` is an unofficial tool and is not affiliated with Preferred Networks.
@@ -58,36 +58,38 @@ $ plamo-tr text translate-text --text 今日はいい天気ですね。
 }
 ```
 
-Read the text from standard input, and print only the translation with `--query` and `--output text`:
+Read the text from standard input, and print only the translation with `jq`:
 
 ```console
 $ echo "The weather is nice today, so let us go for a walk." \
-    | plamo-tr text translate-text --text file:///dev/stdin --query TranslatedText --output text
+    | plamo-tr text translate-text --text file:///dev/stdin | jq -r .TranslatedText
 今日はいい天気だから、散歩に行こう。
 ```
 
-Pick the target language with `--target-language-code`. Global options go anywhere on the command line:
+Pick the target language with `--target-language-code`:
 
 ```console
-$ plamo-tr --output text --query TranslatedText text translate-text \
-    --target-language-code ko --text "The weather is nice today, so let us go for a walk."
+$ plamo-tr text translate-text \
+    --target-language-code ko --text "The weather is nice today, so let us go for a walk." \
+    | jq -r .TranslatedText
 오늘 날씨가 좋으니 산책하러 가요.
 
 $ plamo-tr text translate-text --source-language-code ja --target-language-code zh-Hans \
-    --text 今日はいい天気なので散歩に行きましょう。 --query TranslatedText --output text
+    --text 今日はいい天気なので散歩に行きましょう。 | jq -r .TranslatedText
 今天天气很好，我们去散散步吧。
 ```
 
 List the supported languages as a table:
 
 ```console
-$ plamo-tr language list-languages --output table --query 'Languages[:2]'
-+--------------+--------------+
-| LanguageCode | LanguageName |
-+--------------+--------------+
-| ja           | Japanese     |
-| en           | English      |
-+--------------+--------------+
+$ plamo-tr language list-languages --output table | head -7
++--------------------------------------+
+|              Languages               |
++--------------+-----------------------+
+| LanguageCode | LanguageName          |
++--------------+-----------------------+
+| ja           | Japanese              |
+| en           | English               |
 ```
 
 ## Commands
@@ -111,21 +113,15 @@ The command line follows the grammar of the AWS CLI: `plamo-tr [global options] 
 
 PLaMo Translate translates between Japanese or English and the other supported languages, so either the source or the target must be `ja` or `en`. When you omit the source and the target is `ja` or `en`, PLaMo Translate detects the source language itself. For other targets, `plamo-tr` detects the source language locally with [whatlang](https://github.com/greyblake/whatlang-rs) and sends it with the request.
 
-### Input from JSON and files
+### Input from files
 
-Every subcommand also takes:
-
-- `--cli-input-json <JSON>`: all parameters as one JSON object whose keys are the parameter names in PascalCase (`Text`, `SourceLanguageCode`, ...). Parameters given on the command line take precedence.
-- `--generate-cli-skeleton [input|output]`: print a JSON skeleton of the input (default) or the output and exit.
-
-A value that starts with `file://` names a file to read, for example `--text file://article.txt` or `--cli-input-json file://input.json`.
+A value that starts with `file://` names a file to read, for example `--text file://article.txt`.
 
 ### Global options
 
 | Option | Meaning |
 |---|---|
 | `--output <json\|text\|table>` | Output format. Defaults to `json`. `text` prints the values of an object tab-separated on one line and each list item on its own line. |
-| `--query <JMESPath>` | Select part of the output with a [JMESPath](https://jmespath.org/) expression, for example `TranslatedText`. |
 | `--debug` | Print the parameters and the full error chain to stderr. |
 | `--version` | Print the version. |
 
@@ -136,7 +132,7 @@ A value that starts with `file://` names a file to read, for example `--text fil
 | Exit code | Meaning |
 |---|---|
 | 0 | Success. |
-| 252 | The command line or a parameter is invalid (unknown command or parameter, unsupported language code, missing or empty `--text`, invalid `--cli-input-json` or `--query`). |
+| 252 | The command line or a parameter is invalid (unknown command or parameter, unsupported language code, missing or empty `--text`). |
 | 254 | PLaMo Translate cannot handle the request: it answered with an error (including a rejected login), or the language pair is not supported. |
 | 255 | Any other failure, such as an unreadable auth file or an unreachable network. |
 
