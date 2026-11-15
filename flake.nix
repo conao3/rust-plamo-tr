@@ -25,6 +25,8 @@
             version = "0.1.0";
             src = pkgs.lib.cleanSource ./.;
             cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            buildInputs = [ pkgs.aws-lc ];
             meta = {
               description = "Translate text from the command line with PLaMo Translate";
               homepage = "https://github.com/conao3/rust-plamo-tr";
