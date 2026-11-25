@@ -11,11 +11,11 @@
 </p>
 
 <p align="center">
-  <a href="#install">Install</a> ·
-  <a href="#usage">Usage</a> ·
-  <a href="#commands">Commands</a> ·
-  <a href="#login">Login</a> ·
-  <a href="#library">Library</a> ·
+  <a href="#install">Install</a> |
+  <a href="#usage">Usage</a> |
+  <a href="#commands">Commands</a> |
+  <a href="#login">Login</a> |
+  <a href="#library">Library</a> |
   <a href="#development">Development</a>
 </p>
 
